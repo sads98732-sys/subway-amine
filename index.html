@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Subway Dash — Endless Runner (Surfers-style Clone)</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="game-canvas"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="hud-top">
+      <div id="score-box">
+        <div id="score">0</div>
+        <div id="mult">x1</div>
+      </div>
+      <div id="coin-box">🪙 <span id="coins">0</span></div>
+      <div id="key-box">🔑 <span id="keys">2</span></div>
+    </div>
+    <div id="missions"></div>
+    <div id="power-timers"></div>
+    <div id="hud-buttons">
+      <button id="btn-pause" class="round-btn" title="Pause (P)">⏸</button>
+      <button id="btn-board" class="round-btn board" title="Hoverboard (double-tap / H)">🛹<span id="board-count">1</span></button>
+    </div>
+    <div id="stumble-flash"></div>
+  </div>
+
+  <!-- Main menu -->
+  <div id="menu" class="overlay">
+    <div class="card">
+      <div class="logo-sub">ENDLESS RUNNER</div>
+      <h1>SUBWAY <span>DASH</span></h1>
+      <p class="tag">Dodge the trains. Grab the coins. Outrun the Inspector.</p>
+      <div class="controls-grid">
+        <div><kbd>◀ ▶</kbd><span>switch lane</span></div>
+        <div><kbd>▲ / W</kbd><span>jump</span></div>
+        <div><kbd>▼ / S</kbd><span>roll + slam</span></div>
+        <div><kbd>H / Space ×2</kbd><span>hoverboard</span></div>
+      </div>
+      <p class="touch-hint">📱 swipe to move • swipe down mid-air to slam • double-tap for hoverboard</p>
+      <button id="btn-start" class="big-btn">▶ &nbsp;TAP TO RUN</button>
+      <div class="menu-row">
+        <div>🏆 Best: <b id="menu-best">0</b></div>
+        <div>🪙 Total coins: <b id="menu-total-coins">0</b></div>
+      </div>
+      <details class="mechanics">
+        <summary>Mechanics (researched from the original)</summary>
+        <ul>
+          <li>3-lane endless tracks, speed ramps up the longer you survive.</li>
+          <li>Low barriers → <b>jump</b>. Overhead signs → <b>roll</b>. Trains → <b>switch lane or ride the ramp on top</b>.</li>
+          <li>Coins spawn in lines, arcs over jumps, and grids on train roofs.</li>
+          <li>Power-ups: <b>Magnet</b> pulls coins • <b>Jetpack</b> flies above the tracks • <b>Super Sneakers</b> jump higher • <b>2x Star</b> doubles score • <b>Hoverboard</b> survives one crash.</li>
+          <li>Score multiplier grows as you finish missions (up to x30).</li>
+          <li>Crash without a board = the Inspector catches you. Keys revive you.</li>
+        </ul>
+      </details>
+      <p class="disclaimer">Fan-made remake with original art & code. No original assets used.</p>
+    </div>
+  </div>
+
+  <!-- Countdown -->
+  <div id="countdown" class="hidden">3</div>
+
+  <!-- Game over -->
+  <div id="gameover" class="overlay hidden">
+    <div class="card">
+      <h2 id="go-title">CAUGHT!</h2>
+      <p id="go-sub">The Inspector caught up…</p>
+      <div class="go-stats">
+        <div><label>SCORE</label><b id="go-score">0</b></div>
+        <div><label>COINS</label><b id="go-coins">0</b></div>
+        <div><label>BEST</label><b id="go-best">0</b></div>
+      </div>
+      <div id="go-newbest" class="hidden">🎉 NEW BEST! 🎉</div>
+      <button id="btn-revive" class="big-btn revive">🔑 REVIVE (1 key)</button>
+      <button id="btn-restart" class="big-btn">↻ RUN AGAIN</button>
+      <button id="btn-menu" class="ghost-btn">menu</button>
+    </div>
+  </div>
+
+  <!-- Pause -->
+  <div id="pause" class="overlay hidden">
+    <div class="card">
+      <h2>PAUSED</h2>
+      <button id="btn-resume" class="big-btn">RESUME</button>
+      <button id="btn-quit" class="ghost-btn">quit to menu</button>
+      <div class="controls-grid small">
+        <div><kbd>◀ ▶ / A D</kbd><span>lane</span></div>
+        <div><kbd>▲ / W</kbd><span>jump</span></div>
+        <div><kbd>▼ / S</kbd><span>roll</span></div>
+        <div><kbd>P / Esc</kbd><span>pause</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+</div>
+<script type="module" src="main.js"></script>
+</body>
+</html>
