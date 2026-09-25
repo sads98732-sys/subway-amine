@@ -1,1083 +1,537 @@
 import * as THREE from 'three';
+import { Engine } from './core/Engine.js';
+import { World } from './world/World.js';
+import { Player } from './player/Player.js';
+import { ThirdPersonCamera } from './player/ThirdPersonCamera.js';
+import { SpellSystem } from './combat/SpellSystem.js';
+import { EnemyManager } from './combat/Enemies.js';
+import { HollowWarden } from './combat/Boss.js';
+import { HUD } from './ui/HUD.js';
+import { AudioEngine } from './audio/AudioEngine.js';
+import { NPCManager } from './world/NPCs.js';
+import { Collectibles } from './world/Collectibles.js';
+import { PropManager } from './world/Props.js';
+import { Weather } from './world/Weather.js';
+import { QuestSystem } from './quests/QuestSystem.js';
+import { Progression } from './systems/Progression.js';
+import { Inventory } from './systems/Inventory.js';
+import { WorldState } from './systems/WorldState.js';
+import { Karma } from './systems/Karma.js';
+import { Profiler } from './core/Profiler.js';
+import { Equipment, GEAR } from './systems/Equipment.js';
+import { Caches } from './world/Caches.js';
+import { ShopPanel } from './ui/ShopPanel.js';
+import { DialogueRunner, MAELIS_TREE } from './systems/DialogueTree.js';
+import { DialoguePanel } from './ui/DialoguePanel.js';
+import { CharacterPanel } from './ui/CharacterPanel.js';
+import { MobileControls } from './ui/MobileControls.js';
+import { Minimap } from './ui/Minimap.js';
+import { Plants } from './world/Plants.js';
 
-/* ============================================================
-   SUBWAY DASH — fan-made endless runner (Surfers-style)
-   Original art + code. Mechanics researched via TinyFish:
-   - 3 lanes, swipe/keys: left/right lane, up jump, down roll/slam
-   - double-tap hoverboard = 1-hit shield
-   - trains (static + oncoming), low barriers (jump),
-     high barriers (roll), ramps onto train roofs, poles
-   - coins in lines/arcs/roof-grids, magnet/jetpack/sneakers/2x
-   - score scales with speed + multiplier (missions up to x30)
-   ============================================================ */
+const container = document.getElementById('app');
+const engine = new Engine(container);
+const mobile = new MobileControls(container, engine.input);
 
-const LANES = [-2.2, 0, 2.2];
-const GRAVITY = -32;
-const TRAIN_H = 2.3;
-const TRAIN_W = 1.9;
-// walkable ramp: footprint length, top meets train roof (topY = TRAIN_H+0.29)
-const RAMP_LEN = 4.2;
-const RAMP_TOP = TRAIN_H + 0.29;
+const world = new World(engine.scene);
+const player = new Player(engine.scene, world, engine.input, engine.camera);
+const camera = new ThirdPersonCamera(engine.camera, player, world, engine.input);
+const spells = new SpellSystem(engine.scene, world, player, engine.camera, engine.input);
+const hud = new HUD(container, player, world.sky, spells);
+const enemies = new EnemyManager(engine.scene, world, player, spells, hud);
+spells.enemies = enemies;
+player.world = world; // for respawn ground lookup
+const audio = new AudioEngine();
+spells.audio = audio;
+world.settlements.spells = spells; // ruin puzzle uses spell VFX/audio
+player.audio = audio;
+hud.camera = engine.camera;
+const worldState = new WorldState();
+const npcs = new NPCManager(engine.scene, world, worldState);
+hud.npcs = npcs;
 
-// ---------- tiny helpers ----------
-const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
-const rand = (a,b)=>a+Math.random()*(b-a);
-const randi = (a,b)=>Math.floor(rand(a,b+1));
-const pick = arr=>arr[Math.floor(Math.random()*arr.length)];
-const $ = id=>document.getElementById(id);
+// Karma: raising a wand on the valley's own people has a price, and past a
+// point it cannot be paid off. NPCs fight back through the enemy bolt system,
+// so ward, parry and lock-on all work against them unchanged.
+const karma = new Karma();
+npcs.karma = karma;
+hud.karma = karma;
+spells.karma = karma;
+spells.bystanders = npcs;
+// The two exclusive spells announce themselves, since which one you have is
+// the consequence of how the whole run has been played
+spells.onOathlight = (purity) => {
+  hud.banner('OATHLIGHT', purity > 0.99
+    ? 'Unclouded — the light answers in full'
+    : 'The light answers, dimmed by what you have done');
+  audio.castWhoosh(2.4);
+};
+spells.onBloodtithe = (sin, drained) => {
+  hud.toast(drained > 0 ? 'The tithe is paid' : 'Nothing near enough to take');
+  audio.castWhoosh(0.28);
+};
+for (const n of npcs.npcs) {
+  n.combat = enemies;
+  n.onHarmed = (npc, dmg, wasCalm) => {
+    karma.sin(wasCalm ? 9 : 2.5, 'struck a bystander');
+    if (wasCalm) hud.toast(karma.outlawed ? 'They will not forget this' : 'You struck an innocent');
+  };
+  n.onSlain = (npc) => {
+    karma.sin(30, 'killed a bystander');
+    hud.toast(`${npc.displayName.toLowerCase()} falls`);
+    audio.impact(1.2, npc.position);
+  };
+}
+karma.onOutlawed = () => {
+  hud.banner('OUTLAWED', 'Word runs ahead of you now — the valley draws first');
+  audio.impact(1.6);
+  spells.onShake?.(0.5);
+};
+karma.onTierChange = (tier, prev) => {
+  if (tier.name !== 'clear' && tier.name !== 'outlawed') hud.toast(`Standing: ${tier.label.toLowerCase()}`);
+  else if (tier.name === 'clear' && prev !== 'clear') hud.toast('Your name is clean again');
+};
+player.onRespawn = () => {
+  karma.resetInfamy();
+  spells.lockTarget = null;
+  engine.input.releaseVirtualKeys();
+  hud.banner('RETURNED TO THE GATE', 'Infamy cleared — level, talents and gear retained');
+};
+const collectibles = new Collectibles(engine.scene, world, player, spells, audio);
+hud.collectibles = collectibles;
+const props = new PropManager(engine.scene, world);
+spells.props = props;
+// Hand-placed caches: the gear the shop will never stock
+const caches = new Caches(engine.scene, world, spells, audio);
+const plants = new Plants(engine.scene, world, spells, audio);
+plants.onHarvest = (node) => {
+  hud.toast(`Gathered ${node.itemId === 'emberCap' ? 'Ember Cap' : 'Frost Leaf'}`);
+};
+const boss = new HollowWarden(engine.scene, world, spells, enemies);
+enemies.enemies.push(boss); // spells and lock-on treat it as an enemy
+hud.boss = boss;
+const progression = new Progression(player);
+const inventory = new Inventory(player);
+const charPanel = new CharacterPanel(
+  container, progression, player, collectibles, engine.input, inventory);
+charPanel.caches = caches;
+inventory.onMessage = (msg) => hud.toast(msg);
+const equipment = new Equipment(player);
+charPanel.equipment = equipment;
+progression.equipment = equipment;
+progression.apply(); // fold gear into the mods now that it exists
+const shop = new ShopPanel(container, inventory, equipment, player);
+// Robes restyle the character for real
+equipment.onRobeChange = (g) => player.model.setPalette({ robe: g.robe, trim: g.trim });
+// Every new piece is a collection milestone worth calling out
+equipment.onFound = (g) => {
+  const c = equipment.collection;
+  hud.banner(g.name.toUpperCase(), `Gear ${c.owned}/${c.total} — press I to equip`);
+};
+equipment.equip(equipment.equipped.robe); // apply the saved robe on load
 
-// ---------- audio (procedural, no assets) ----------
-const AudioSys = {
-  ctx:null,
-  init(){ if(this.ctx) return; try{ this.ctx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} },
-  beep(freq=440,dur=0.08,type='square',vol=0.12,slide=0){
-    if(!this.ctx) return;
-    const t=this.ctx.currentTime, o=this.ctx.createOscillator(), g=this.ctx.createGain();
-    o.type=type; o.frequency.setValueAtTime(freq,t);
-    if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(40,freq+slide),t+dur);
-    g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
-    o.connect(g); g.connect(this.ctx.destination); o.start(t); o.stop(t+dur+0.02);
+// Branching conversations with the professor
+const dialogue = new DialogueRunner({
+  worldState, inventory, progression, hud, equipment, player, quests: null,
+});
+const dialoguePanel = new DialoguePanel(container, dialogue, engine.input);
+hud.progression = progression;
+
+// XP flows from every source of accomplishment; the work the valley wanted
+// done also earns virtue, which quietly burns infamy back down
+collectibles.onCollect = () => {
+  progression.addXp(25, 'shard');
+  karma.praise(1.5, 'shard');
+};
+progression.onLevelUp = (lvl) => {
+  hud.banner(`LEVEL ${lvl}`, 'A talent point awaits — press I');
+  audio.castWhoosh(1.8);
+};
+progression.onXp = (amt) => hud.floatXp(amt);
+const weather = new Weather(engine.scene, engine.camera, audio);
+const quests = new QuestSystem(container, player, npcs, engine.input);
+dialogue.ctx.quests = quests; // the tree drives the objective tracker
+const minimap = new Minimap(container, {
+  player, worldState, quests, npcs, enemies, boss,
+  caches, collectibles, cavern: world.cavern,
+});
+quests.onReward = (xp) => {
+  progression.addXp(xp, 'quest');
+  karma.praise(18, 'quest');
+};
+boss.onPhase = (p) => hud.banner('THE WARDEN WAKES', `Phase ${p} — the heartwood burns`);
+boss.onFinisherReady = () => hud.toast('The Warden is broken — press F');
+boss.onDefeated = () => {
+  hud.banner('WARDEN FELLED', 'The deep wood exhales');
+  progression.addXp(600, 'boss');
+  karma.praise(25, 'boss');
+  inventory.add('aetherDust', 3);
+  worldState.set('bossFelled');
+};
+world.settlements.onSolved = () => {
+  hud.banner('THE RING AWAKENS', 'Something long sealed stirs beneath the stones');
+  progression.addXp(200, 'puzzle');
+  karma.praise(12, 'ring');
+  worldState.set('ringAwakened');
+};
+enemies.onEnemyKilled = (enemy) => {
+  quests.onEnemyKilled();
+  progression.addXp(enemy?.isGolem ? 90 : 30, 'kill');
+  karma.praise(enemy?.isGolem ? 5 : 2, 'cleared a fiend');
+  worldState.wispsSlain++;
+  // Reagent drops feed the brewing loop
+  if (enemy?.isGolem) inventory.add('aetherDust', 1);
+  else if (Math.random() < 0.6) inventory.add(Math.random() < 0.5 ? 'emberCap' : 'frostLeaf', 1);
+  inventory.addCrowns(enemy?.isBoss ? 250 : enemy?.isGolem ? 45 : 12);
+};
+
+const listenerDir = new THREE.Vector3();
+
+// Profiler + adaptive quality (F3 toggles the overlay)
+const profiler = new Profiler(engine, container);
+engine.profiler = profiler;
+profiler.onTierChange = (t) => {
+  world.vegetation.setQuality({ grass: t.grass, lowDetailTrees: t.grass < 0.6 });
+  world.sky.sun.shadow.mapSize.setScalar(t.shadow);
+  world.sky.sun.shadow.map?.dispose();
+  world.sky.sun.shadow.map = null;
+};
+profiler.applyTier(engine.renderer, engine.bloom); // honour the starting tier
+
+// Point lights are expensive, and how expensive depends on how many are lit:
+// three.js compiles the count into every material, so a light flicking on or
+// off rebuilds the entire program cache — the old distance cull did that every
+// quarter second. Instead exactly LIGHT_POOL of them stay enabled, always the
+// nearest ones. The count never changes, so the shaders never rebuild, and the
+// ones parked far away contribute nothing anyway: every lamp here has a
+// falloff distance well under the range at which it would be swapped out.
+const LIGHT_POOL = 6;
+const allPointLights = [];
+engine.scene.traverse((o) => { if (o.isPointLight) allPointLights.push(o); });
+const lightRank = allPointLights.map((l) => ({ l, d: 0 }));
+let lightCullTimer = 0;
+const _lightPos = new THREE.Vector3();
+
+// Finisher cinematic: slow-motion orbit around the killing blow
+const cinematic = { active: false, t: 0 };
+let trailTimer = 0;
+
+// The broom arrives in a scatter of sparks rather than blinking into being
+player.onBroomSummoned = () => {
+  spells.spawnBurst(player.position.clone().setY(player.position.y + 0.6),
+    26, 4, 0xffd27a, 0.8);
+};
+
+// Taking a hit in the air drops you out of the sky
+player.onFlightBroken = () => {
+  hud.toast('You are thrown from the broom');
+  spells.onShake?.(0.3);
+  audio.impact(0.8, player.position);
+};
+
+// Stripping a body is its own small transgression, on top of the killing
+function lootBody(npc) {
+  const haul = npc.loot();
+  if (!haul) return;
+  const named = [];
+  if (haul.crowns) inventory.addCrowns(haul.crowns);
+  for (const [id, n] of Object.entries(haul.items)) inventory.add(id, n);
+  if (haul.gear && equipment.grant(haul.gear)) named.push(GEAR[haul.gear].name);
+  spells.spawnBurst(npc.position.clone().setY(npc.position.y + 0.5), 16, 3, 0x8a7a5a, 0.7);
+  audio.castWhoosh(0.5);
+  hud.toast(named.length ? `Taken: ${named[0]}` : 'You search the body');
+  karma.sin(4, 'robbed the dead');
+}
+
+// Camera shake: spells feed impulses, camera system applies decay
+let shake = 0;
+spells.onShake = (amt) => { shake = Math.min(shake + amt, 0.7); };
+// A clean parry flashes the word and gives a brief slow-motion beat
+let parrySlow = 0;
+spells.onCounter = () => {
+  hud._counterTimer = 0.75;
+  parrySlow = 0.28;
+  audio.castWhoosh(2.2, player.position);
+};
+
+// Refresh IBL environment as the sky changes (every ~6s real time)
+let envTimer = 0;
+world.sky.update(0, 0); // prime sky colors before first env bake
+world.sky.refreshEnvironment(engine.renderer);
+
+engine.addSystem({
+  update(rawDt, elapsed) {
+    // Slow-mo during the finisher, easing back to normal as it ends
+    let dt = rawDt;
+    if (cinematic.active) {
+      cinematic.t += rawDt;
+      dt = rawDt * (cinematic.t < 2.4 ? 0.32 : 1);
+      if (cinematic.t > 4.2) cinematic.active = false;
+    } else if (parrySlow > 0) {
+      parrySlow -= rawDt;
+      dt = rawDt * 0.35; // the parry beat
+    }
+    weather.indoors = world.castle.isInsideHall(player.position);
+    weather.update(dt, elapsed);
+    karma.update(dt);
+    world.update(dt, elapsed, weather, player.position);
+    npcs.weatherState = weather.state;
+    // LOD follows the camera, not the player — flying pulls the view far back
+    npcs.viewPos = engine.camera.position;
+    npcs.update(dt, elapsed, world.sky.timeOfDay, player.position);
+    collectibles.update(dt, elapsed);
+    caches.update(dt, elapsed);
+    plants.update(dt, elapsed);
+    quests.update();
+    minimap.update(dt);
+    charPanel.update();
+
+    // Chest: F to open when standing close, showers reagents and a potion
+    const cav = world.cavern;
+    const nearChest = !cav.looted && player.position.distanceTo(cav.chestPos) < 3.2;
+    // A conversation owns the controls, but the world keeps living around it
+    engine.input.suspended = dialogue.active || shop.open || charPanel.open;
+    mobile.update();
+    if (dialogue.active) {
+      dialoguePanel.update();
+      hud.setPrompt(null);
+      return;
+    }
+    // Standing over a body or a cache beats everything else you could be doing
+    const body = nearChest ? null : npcs.nearestLootable(player.position);
+    const cache = (nearChest || body) ? null : caches.nearest(player.position);
+    const plant = (nearChest || body || cache) ? null : plants.nearest(player.position);
+    const professor = (body || cache || plant)
+      ? null : npcs.availableProfessor(player.position);
+    const merchant = (nearChest || body || cache || plant)
+      ? null : npcs.nearestMerchant(player.position);
+    // Talking to a student takes priority only when nothing else is in reach
+    const speaker = (nearChest || body || cache || plant || merchant)
+      ? null : npcs.nearestSpeaker(player.position);
+    hud.setPrompt(shop.open ? null
+      : nearChest ? 'F — open the warded chest'
+      : body ? 'F — search the body'
+      : cache ? 'F — open the cache'
+      : plant ? 'F — harvest plant'
+      : professor ? 'F — speak with Professor Maelis'
+      : merchant ? 'F — trade with Bramwell'
+      : speaker ? 'F — speak' : null);
+    if (shop.open) {
+      if (engine.input.wasPressed('KeyF') || engine.input.wasPressed('Escape')) shop.toggle(false);
+    } else if (body && engine.input.wasPressed('KeyF')) {
+      lootBody(body);
+    } else if (cache && engine.input.wasPressed('KeyF')) {
+      caches.open(cache, inventory, equipment);
+    } else if (plant && engine.input.wasPressed('KeyF')) {
+      plants.harvest(plant, inventory);
+    } else if (professor && engine.input.wasPressed('KeyF')) {
+      dialogue.start(MAELIS_TREE);
+    } else if (merchant && engine.input.wasPressed('KeyF')) {
+      shop.toggle(true);
+    } else if (speaker && engine.input.wasPressed('KeyF')) {
+      npcs.converse(speaker);
+    }
+    if (nearChest && engine.input.wasPressed('KeyF') && cav.open()) {
+      inventory.add('emberCap', 3);
+      inventory.add('frostLeaf', 3);
+      inventory.add('aetherDust', 2);
+      inventory.add('healPotion', 1);
+      progression.addXp(120, 'chest');
+      spells.spawnBurst(cav.chestPos.clone().setY(cav.chestPos.y + 1), 40, 5, 0xffd27a, 1.1);
+      audio.castWhoosh(1.5);
+      hud.banner('WARDED CHEST', 'Reagents and a draught within');
+    }
+    // Finisher: F when the Warden is broken triggers the cinematic
+    if (boss.finisherReady && !boss.finisherPlaying && !boss.dead &&
+        engine.input.wasPressed('KeyF') && boss.startFinisher()) {
+      cinematic.t = 0;
+      cinematic.active = true;
+    }
+    // Quick-drink: 1 and 2 use the first two potions carried
+    if (engine.input.wasPressed('Digit1')) inventory.use(inventory.potions()[0]);
+    if (engine.input.wasPressed('Digit2')) inventory.use(inventory.potions()[1]);
+    envTimer += dt;
+    if (envTimer > 6) {
+      envTimer = 0;
+      world.sky.refreshEnvironment(engine.renderer);
+    }
+    player.update(dt);
+    spells.update(dt);
+    enemies.update(dt, elapsed); // drives the boss too — it is in the enemy list
+    props.update(dt, (p, n, s, c, l) => spells.spawnBurst(p, n, s, c, l), audio, enemies);
+    world.sky.setFocus(player.position);
+    const elev = world.sky.sunElevation ?? 0.5;
+    const dayness = Math.max(0, Math.min(1, (elev + 0.05) * 4));
+    audio.update(dt, dayness);
+    // Flight: rushing air scaled by speed, and a thin ribbon of sparks so the
+    // sense of speed reads visually as well as audibly
+    const flySpeed01 = player.flying
+      ? Math.min(1, Math.hypot(player.velocity.x, player.velocity.z) / 26) : 0;
+    audio.setFlightRush(flySpeed01);
+    if (flySpeed01 > 0.25) {
+      trailTimer -= dt;
+      if (trailTimer <= 0) {
+        trailTimer = 0.045;
+        spells.spawnBurst(player.position.clone().setY(player.position.y + 0.9),
+          2, 1.2, 0x9fd8ff, 0.5);
+      }
+    }
+    audio.setListener(engine.camera, engine.camera.getWorldDirection(listenerDir));
+    // Cinematic grade follows the hour and the sky
+    const duskness = Math.max(0, 1 - Math.abs(elev) / 0.28) * (elev > -0.12 ? 1 : 0);
+    engine.grading.applyMood(dayness, duskness, weather.cur.dim, weather.snowCover);
   },
-  coin(){ this.beep(1320,0.07,'square',0.07); setTimeout(()=>this.beep(1760,0.09,'square',0.06),45); },
-  jump(){ this.beep(300,0.15,'sine',0.12,400); },
-  roll(){ this.beep(220,0.18,'sawtooth',0.07,-120); },
-  crash(){ this.beep(160,0.4,'sawtooth',0.2,-120); this.beep(70,0.5,'square',0.18,-30); },
-  power(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>this.beep(f,0.12,'square',0.09),i*70)); },
-  click(){ this.beep(600,0.05,'square',0.08); },
-  horn(){ this.beep(180,0.5,'sawtooth',0.1,-40); },
-};
-
-// ---------- persistent bests ----------
-const store = {
-  get best(){ return parseInt(localStorage.getItem('sd_best')||'0'); },
-  set best(v){ localStorage.setItem('sd_best', String(v)); },
-  get totalCoins(){ return parseInt(localStorage.getItem('sd_coins')||'0'); },
-  set totalCoins(v){ localStorage.setItem('sd_coins', String(v)); },
-};
-
-// ---------- three setup ----------
-const canvas = $('game-canvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 30, 130);
-
-const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 300);
-const hemi = new THREE.HemisphereLight(0xbfe3ff, 0x3a4a3a, 0.95);
-scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xfff2d9, 1.6);
-sun.position.set(-8, 18, 8);
-sun.castShadow = true;
-sun.shadow.mapSize.set(1024,1024);
-sun.shadow.camera.left=-15; sun.shadow.camera.right=15;
-sun.shadow.camera.top=20; sun.shadow.camera.bottom=-30;
-sun.shadow.camera.far=80;
-scene.add(sun);
-scene.add(new THREE.AmbientLight(0xffffff, 0.15));
-
-function resize(){
-  const w=innerWidth,h=innerHeight;
-  renderer.setSize(w,h,false);
-  camera.aspect=w/h; camera.updateProjectionMatrix();
-}
-addEventListener('resize', resize); resize();
-
-// ---------- canvas textures (graffiti etc, all original) ----------
-function graffitiTexture(base, tag){
-  const c=document.createElement('canvas'); c.width=256; c.height=128;
-  const g=c.getContext('2d');
-  g.fillStyle=base; g.fillRect(0,0,256,128);
-  g.fillStyle='rgba(0,0,0,.18)';
-  for(let i=0;i<6;i++) g.fillRect(0, 18+i*20, 256, 3);
-  g.font='bold italic 44px Arial'; g.textAlign='center';
-  g.lineWidth=8; g.strokeStyle='rgba(0,0,0,.7)'; g.strokeText(tag,128,82);
-  g.fillStyle=pick(['#ffd23f','#ff5da2','#7CFC98','#4dd7ff','#ff7a3d']);
-  g.fillText(tag,128,82);
-  // spray dots
-  for(let i=0;i<80;i++){ g.fillStyle=`rgba(255,255,255,${Math.random()*.5})`; g.fillRect(rand(0,256),rand(0,128),2,2); }
-  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; return t;
-}
-function buildingTexture(){
-  const c=document.createElement('canvas'); c.width=128; c.height=256;
-  const g=c.getContext('2d');
-  const pal=['#e85d75','#4d96ff','#6bcb77','#ffd93d','#9d4edd','#ff6b35','#3dc1d3'];
-  g.fillStyle=pick(pal); g.fillRect(0,0,128,256);
-  g.fillStyle='rgba(0,0,0,.25)'; g.fillRect(0,0,128,18);
-  g.fillStyle='#ffe66d';
-  for(let y=30;y<240;y+=26) for(let x=10;x<118;x+=24){
-    g.fillStyle = Math.random()<.75 ? '#fff8c9' : '#2b2d42';
-    g.fillRect(x,y,14,16);
-  }
-  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; return t;
-}
-
-// ---------- static world ----------
-const world = new THREE.Group(); scene.add(world);
-const groundMat = new THREE.MeshLambertMaterial({ color:0x4a4a52 });
-const ballastMat = new THREE.MeshLambertMaterial({ color:0x5b5b66 });
-
-// ground plane segments (recycled for texture scroll illusion — we keep static + move props instead)
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(60, 300), new THREE.MeshLambertMaterial({color:0x6b6f7a}));
-ground.rotation.x=-Math.PI/2; ground.position.z=-100; ground.receiveShadow=true; scene.add(ground);
-
-// track beds + rails + sleepers per lane
-const trackGroup = new THREE.Group(); scene.add(trackGroup);
-const railMat = new THREE.MeshStandardMaterial({ color:0xb8bec9, metalness:.7, roughness:.35 });
-const sleeperMat = new THREE.MeshLambertMaterial({ color:0x3d2b1f });
-for(const lx of LANES){
-  const bed = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.1, 300), ballastMat);
-  bed.position.set(lx, 0.02, -110); bed.receiveShadow=true; trackGroup.add(bed);
-  for(const off of [-0.7, 0.7]){
-    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, 300), railMat);
-    rail.position.set(lx+off, 0.12, -110); trackGroup.add(rail);
-  }
-}
-// sleepers (instanced-ish, simple meshes recycled)
-const sleepers=[];
-const sleeperGeo = new THREE.BoxGeometry(1.8, 0.08, 0.5);
-for(let i=0;i<60;i++){
-  for(const lx of LANES){
-    const s=new THREE.Mesh(sleeperGeo, sleeperMat);
-    s.position.set(lx, 0.06, 10 - i*2.2);
-    trackGroup.add(s); sleepers.push(s);
-  }
-}
-
-// side buildings + lamps + skyline (recycled)
-const sideProps=[];
-function makeBuilding(side){
-  const h=rand(8,22), w=rand(5,9);
-  const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,6),
-    new THREE.MeshLambertMaterial({ map:buildingTexture() }));
-  m.position.set(side*rand(10,22), h/2, rand(-140,10));
-  scene.add(m); sideProps.push({mesh:m, speed:1});
-}
-for(let i=0;i<26;i++){ makeBuilding(i%2?1:-1); }
-// lamp posts
-const lampGeo = new THREE.CylinderGeometry(0.08,0.1,6,6);
-const lampMat = new THREE.MeshLambertMaterial({color:0x222831});
-const lampHeadMat = new THREE.MeshBasicMaterial({color:0xfff2a8});
-for(let i=0;i<14;i++){
-  for(const s of [-1,1]){
-    const p=new THREE.Mesh(lampGeo,lampMat); p.position.set(s*5.2,3,-130+i*11); scene.add(p);
-    const h=new THREE.Mesh(new THREE.SphereGeometry(0.28,8,8),lampHeadMat); h.position.set(s*5.2,6.1,-130+i*11); scene.add(h);
-    sideProps.push({mesh:p,speed:1}); sideProps.push({mesh:h,speed:1});
-  }
-}
-// clouds
-const clouds=[];
-for(let i=0;i<8;i++){
-  const g=new THREE.Group();
-  for(let j=0;j<3;j++){
-    const s=new THREE.Mesh(new THREE.SphereGeometry(rand(1.5,3),8,8),
-      new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:.9}));
-    s.position.set(j*2.2, rand(-.4,.4), 0); s.scale.y=.55; g.add(s);
-  }
-  g.position.set(rand(-30,30), rand(14,26), rand(-140,-20));
-  scene.add(g); clouds.push(g);
-}
-
-// ---------- player ----------
-function buildRunner(shirt=0xff5da2, pants=0x2b50ff, skin=0xf2b880){
-  const g=new THREE.Group();
-  const mat = c=>new THREE.MeshLambertMaterial({color:c});
-  const torso=new THREE.Mesh(new THREE.BoxGeometry(0.72,0.8,0.42), mat(shirt));
-  torso.position.y=1.25; torso.castShadow=true; g.add(torso); g.userData.torso=torso;
-  const head=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5), mat(skin));
-  head.position.y=1.95; head.castShadow=true; g.add(head); g.userData.head=head;
-  const cap=new THREE.Mesh(new THREE.BoxGeometry(0.54,0.16,0.54), mat(0xe63946));
-  cap.position.y=2.24; g.add(cap);
-  const brim=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.06,0.3), mat(0xe63946));
-  brim.position.set(0,2.18,-0.4); g.add(brim);
-  const pack=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.55,0.22), mat(0x27ae60));
-  pack.position.set(0,1.3,0.32); g.add(pack);
-  const legL=new THREE.Mesh(new THREE.BoxGeometry(0.26,0.85,0.3), mat(pants));
-  legL.geometry.translate(0,-0.42,0); legL.position.set(-0.19,0.85,0); legL.castShadow=true; g.add(legL);
-  const legR=legL.clone(); legR.position.x=0.19; g.add(legR);
-  const armL=new THREE.Mesh(new THREE.BoxGeometry(0.2,0.7,0.24), mat(shirt));
-  armL.geometry.translate(0,-0.35,0); armL.position.set(-0.5,1.6,0); armL.castShadow=true; g.add(armL);
-  const armR=armL.clone(); armR.position.x=0.5; g.add(armR);
-  g.userData={...g.userData, legL, legR, armL, armR};
-  // hoverboard
-  const board=new THREE.Mesh(new THREE.BoxGeometry(0.6,0.1,1.3),
-    new THREE.MeshStandardMaterial({color:0xffd23f, emissive:0x7a5b00, emissiveIntensity:.5, metalness:.4, roughness:.4}));
-  board.position.y=0.12; board.visible=false; board.castShadow=true; g.add(board); g.userData.board=board;
-  // jetpack
-  const jet=new THREE.Group();
-  const jm=new THREE.MeshStandardMaterial({color:0x888899, metalness:.7, roughness:.3});
-  for(const s of [-1,1]){
-    const tank=new THREE.Mesh(new THREE.CylinderGeometry(0.14,0.14,0.7,10), jm);
-    tank.position.set(s*0.28,1.35,0.42); jet.add(tank);
-    const flame=new THREE.Mesh(new THREE.ConeGeometry(0.13,0.7,8),
-      new THREE.MeshBasicMaterial({color:s<0?0x4dd7ff:0xff9d00}));
-    flame.position.set(s*0.28,0.65,0.42); flame.rotation.x=Math.PI; jet.add(flame);
-    jet.userData['flame'+s]=flame;
-  }
-  jet.visible=false; g.add(jet); g.userData.jet=jet;
-  return g;
-}
-const player = buildRunner();
-scene.add(player);
-
-// guard + dog (chaser)
-const guard = buildRunner(0x1d3557, 0x111111, 0xe0a070);
-guard.scale.setScalar(1.18); guard.position.set(0,0,4.5); guard.visible=false; scene.add(guard);
-const dog = new THREE.Group();
-{
-  const m=new THREE.MeshLambertMaterial({color:0x8b5e34});
-  const b=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.4,0.9),m); b.position.y=0.5; b.castShadow=true; dog.add(b);
-  const h=new THREE.Mesh(new THREE.BoxGeometry(0.34,0.34,0.36),m); h.position.set(0,0.85,-0.5); dog.add(h);
-  dog.position.set(0.8,0,4.8); dog.visible=false; scene.add(dog);
-}
-
-// ---------- entity factories ----------
-const TRAIN_COLORS = [
-  ['#e63946','TURBO'], ['#2a9d8f','METRO'], ['#f4a261','RAPID'],
-  ['#9d4edd','GRAFF'], ['#118ab2','CITY'], ['#ef476f','DASH'],
-];
-function makeTrain(len=12){
-  const [base,tag]=pick(TRAIN_COLORS);
-  const g=new THREE.Group();
-  const body=new THREE.Mesh(new THREE.BoxGeometry(TRAIN_W,TRAIN_H,len),
-    new THREE.MeshLambertMaterial({ map:graffitiTexture(base,tag) }));
-  body.position.y=TRAIN_H/2+0.1; body.castShadow=true; body.receiveShadow=true; g.add(body);
-  const roof=new THREE.Mesh(new THREE.BoxGeometry(TRAIN_W+0.15,0.18,len+0.2),
-    new THREE.MeshLambertMaterial({color:0x2b2d42}));
-  roof.position.y=TRAIN_H+0.2; roof.castShadow=true; g.add(roof);
-  const front=new THREE.Mesh(new THREE.BoxGeometry(TRAIN_W-0.2,1.4,0.4),
-    new THREE.MeshLambertMaterial({color:0x111111}));
-  front.position.set(0,1.0,len/2+0.1); g.add(front);
-  const light=new THREE.Mesh(new THREE.SphereGeometry(0.14,8,8), new THREE.MeshBasicMaterial({color:0xfff200}));
-  light.position.set(0,1.7,len/2+0.32); g.add(light);
-  // wheels/bogies
-  const wm=new THREE.MeshLambertMaterial({color:0x111111});
-  for(let z=-len/2+1.5; z<len/2; z+=4){
-    const w=new THREE.Mesh(new THREE.BoxGeometry(1.6,0.5,1.2),wm);
-    w.position.set(0,0.3,z); g.add(w);
-  }
-  g.userData={ kind:'train', len, w:TRAIN_W, h:TRAIN_H+0.25, moving:false, topY:TRAIN_H+0.29 };
-  return g;
-}
-function makeBarrierLow(){
-  const g=new THREE.Group();
-  const stripe=document.createElement('canvas'); stripe.width=64; stripe.height=16;
-  const sg=stripe.getContext('2d');
-  sg.fillStyle='#ffbe0b'; sg.fillRect(0,0,64,16);
-  sg.fillStyle='#111'; for(let i=-16;i<64;i+=16){ sg.beginPath(); sg.moveTo(i,16); sg.lineTo(i+8,0); sg.lineTo(i+16,0); sg.lineTo(i+8,16); sg.fill(); }
-  const st=new THREE.CanvasTexture(stripe); st.colorSpace=THREE.SRGBColorSpace;
-  st.wrapS=THREE.RepeatWrapping; st.repeat.x=3;
-  const bar=new THREE.Mesh(new THREE.BoxGeometry(2.0,0.55,0.35),
-    new THREE.MeshLambertMaterial({map:st}));
-  bar.position.y=0.75; bar.castShadow=true; g.add(bar);
-  for(const s of [-1,1]){
-    const leg=new THREE.Mesh(new THREE.BoxGeometry(0.14,0.75,0.3), new THREE.MeshLambertMaterial({color:0x333333}));
-    leg.position.set(s*0.9,0.38,0); g.add(leg);
-  }
-  g.userData={kind:'low', len:0.6, w:2.0, h:1.05, jumpOver:0.85};
-  return g;
-}
-function makeBarrierHigh(){
-  const g=new THREE.Group();
-  const sign=new THREE.Mesh(new THREE.BoxGeometry(2.0,0.9,0.3),
-    new THREE.MeshLambertMaterial({color:0x06d6a0}));
-  sign.position.y=1.85; sign.castShadow=true; g.add(sign);
-  const txt=document.createElement('canvas'); txt.width=128; txt.height=48;
-  const tg=txt.getContext('2d'); tg.fillStyle='#06d6a0'; tg.fillRect(0,0,128,48);
-  tg.font='bold 26px Arial'; tg.textAlign='center'; tg.fillStyle='#073b4c'; tg.fillText('▼ ROLL ▼',64,33);
-  const tt=new THREE.CanvasTexture(txt); tt.colorSpace=THREE.SRGBColorSpace;
-  sign.material.map=tt;
-  for(const s of [-1,1]){
-    const pole=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,2.4,8),
-      new THREE.MeshLambertMaterial({color:0x444444}));
-    pole.position.set(s*0.9,1.2,0); g.add(pole);
-  }
-  g.userData={kind:'high', len:0.6, w:2.0, mustRoll:true, h:2.3};
-  return g;
-}
-function makePole(){
-  const g=new THREE.Group();
-  const p=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.2,3.2,8),
-    new THREE.MeshLambertMaterial({color:0x2ec4b6}));
-  p.position.y=1.6; p.castShadow=true; g.add(p);
-  const sig=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.7,0.3),
-    new THREE.MeshBasicMaterial({color:0xff0000}));
-  sig.position.y=3.0; g.add(sig); g.userData.signal=sig;
-  g.userData={kind:'block', len:0.6, w:0.6, h:3.2, signal:sig};
-  return g;
-}
-function makeRamp(){
-  // Walkable wedge: LOW edge faces the player (+z, arrives first),
-  // rising toward the train (-z) with the top lip flush with the roof.
-  const g=new THREE.Group();
-  const slopeLen=Math.sqrt(RAMP_LEN*RAMP_LEN+RAMP_TOP*RAMP_TOP);
-  const ang=Math.atan2(RAMP_TOP, RAMP_LEN); // >0 => +z end low, -z end high
-  // striped deck (direction-neutral rungs so mirroring can't confuse it)
-  const c=document.createElement('canvas'); c.width=64; c.height=128;
-  const sg=c.getContext('2d');
-  sg.fillStyle='#ffd23f'; sg.fillRect(0,0,64,128);
-  sg.fillStyle='#111111';
-  for(let y=8;y<128;y+=24) sg.fillRect(0,y,64,9);
-  const stripeTex=new THREE.CanvasTexture(c); stripeTex.colorSpace=THREE.SRGBColorSpace;
-  const deck=new THREE.Mesh(new THREE.BoxGeometry(1.8,0.18,slopeLen),
-    new THREE.MeshLambertMaterial({map:stripeTex}));
-  deck.position.set(0, RAMP_TOP/2, 0);
-  deck.rotation.x=ang;
-  deck.castShadow=true; deck.receiveShadow=true; g.add(deck);
-  // dark side skirts sell the wedge silhouette
-  for(const s of [-1,1]){
-    const skirt=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.6,slopeLen),
-      new THREE.MeshLambertMaterial({color:0x333333}));
-    skirt.position.set(s*0.95, RAMP_TOP/2-0.25, 0);
-    skirt.rotation.x=ang; g.add(skirt);
-  }
-  // foot block under the LOW (player-side, +z) entry lip
-  const foot=new THREE.Mesh(new THREE.BoxGeometry(1.8,0.3,0.5),
-    new THREE.MeshLambertMaterial({color:0x333333}));
-  foot.position.set(0,0.15,RAMP_LEN/2-0.2); foot.castShadow=true; g.add(foot);
-  g.userData={kind:'ramp', len:RAMP_LEN, w:1.8, top:RAMP_TOP};
-  return g;
-}
-const coinGeo = new THREE.CylinderGeometry(0.42,0.42,0.12,18);
-const coinMat = new THREE.MeshStandardMaterial({color:0xffd23f, metalness:.65, roughness:.25, emissive:0x6b4e00, emissiveIntensity:.45});
-function makeCoin(){
-  const m=new THREE.Mesh(coinGeo, coinMat);
-  m.rotation.z=Math.PI/2; m.castShadow=true;
-  m.userData={kind:'coin'};
-  return m;
-}
-const POWER_DEFS = {
-  magnet:{ color:0xff3b3b, label:'🧲', name:'MAGNET!' },
-  jetpack:{ color:0x4dd7ff, label:'🚀', name:'JETPACK!' },
-  sneakers:{ color:0x7CFC98, label:'👟', name:'SUPER SNEAKERS!' },
-  star:{ color:0xffd23f, label:'⭐', name:'2x SCORE!' },
-  board:{ color:0xff8c00, label:'🛹', name:'HOVERBOARD!' },
-};
-function makePowerup(type){
-  const d=POWER_DEFS[type];
-  const g=new THREE.Group();
-  const box=new THREE.Mesh(new THREE.BoxGeometry(0.8,0.8,0.8),
-    new THREE.MeshStandardMaterial({color:d.color, emissive:d.color, emissiveIntensity:.35, roughness:.3}));
-  box.castShadow=true; g.add(box);
-  // floating label sprite
-  const c=document.createElement('canvas'); c.width=c.height=64;
-  const ctx=c.getContext('2d'); ctx.font='44px serif'; ctx.textAlign='center'; ctx.fillText(d.label,32,50);
-  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), transparent:true}));
-  sp.scale.setScalar(0.9); sp.position.y=0.85; g.add(sp);
-  g.userData={kind:'power', ptype:type, len:1, w:1, h:2, box};
-  g.position.y=1.0;
-  return g;
-}
-
-// ---------- game state ----------
-const G = {
-  state:'menu', // menu | countdown | run | over | pause
-  speed:12, baseSpeed:12, maxSpeed:30,
-  lane:1, x:0, y:0, vy:0, grounded:true, rolling:0, rollDur:0.72,
-  onTrainTop:false,
-  score:0, coins:0, keys:2, boards:1,
-  mult:1, starT:0, magnetT:0, sneakT:0, jetT:0, boardT:0, shield:false,
-  invinc:0, distance:0, nextSpawnZ:-40,
-  jumps:0, rolls:0,
-  missions:[
-    { id:'coins', text:'Collect 150 coins', target:150, prog:0 },
-    { id:'jump', text:'Jump 25 times', target:25, prog:0 },
-    { id:'roll', text:'Roll 25 times', target:25, prog:0 },
-  ],
-  missionLevel:0,
-  runCoins:0,
-  time:0,
-  dead:false,
-};
-const entities=[]; // {mesh, ...}
-
-function toast(msg, ms=1400){
-  const t=$('toast'); t.textContent=msg; t.classList.remove('hidden');
-  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'), ms);
-}
-
-// ---------- spawning ----------
-function addEntity(mesh, lane, z){
-  mesh.position.x = LANES[lane];
-  mesh.position.z = z;
-  scene.add(mesh);
-  entities.push(mesh);
-  return mesh;
-}
-function coinLine(lane, z, n=6, y=1.0, gap=2.0){
-  for(let i=0;i<n;i++){
-    const c=makeCoin(); c.position.set(LANES[lane], y, z - i*gap);
-    c.userData.spin=rand(0,6); scene.add(c); entities.push(c);
-  }
-}
-function coinArc(lane, z){
-  const ys=[1.0,1.9,2.5,2.5,1.9,1.0];
-  ys.forEach((y,i)=>{ const c=makeCoin(); c.position.set(LANES[lane],y,z-i*2.0); c.userData.spin=rand(0,6); scene.add(c); entities.push(c); });
-}
-function coinRoof(lane, z, len){
-  const n=Math.floor(len/2.2);
-  for(let i=0;i<n;i++){ const c=makeCoin(); c.position.set(LANES[lane],TRAIN_H+1.1,z-i*2.2); c.userData.spin=rand(0,6); scene.add(c); entities.push(c); }
-}
-function coinSkyRow(z, n=8){
-  for(let i=0;i<n;i++) for(const l of [0,1,2]){
-    const c=makeCoin(); c.position.set(LANES[l], 6+Math.sin(i*.7)*0.5, z-i*2.4);
-    c.userData.spin=rand(0,6); scene.add(c); entities.push(c);
-  }
-}
-
-function spawnPattern(z){
-  const d = G.distance; // difficulty
-  const roll = Math.random();
-  const freeLane = randi(0,2);
-
-  // early game: gentle
-  if(d < 150){
-    const r=Math.random();
-    if(r<.3){ addEntity(makeBarrierLow(), randi(0,2), z); coinArc(freeLane, z-2); }
-    else if(r<.5){ addEntity(makeBarrierHigh(), randi(0,2), z); coinLine(freeLane, z, 6); }
-    else if(r<.7){ addEntity(makeTrain(randi(6,10)), randi(0,2), z-4); coinLine((randi(0,2)), z, 5); }
-    else { coinLine(randi(0,2), z, 8); }
-    return z - rand(22,30);
-  }
-
-  if(roll < 0.16){
-    // long trains on 2 lanes + ramp on the third so you can ride the roof
-    const lanes=[0,1,2];
-    const rideLane=randi(0,2);
-    const len=rand(12,22);
-    for(const l of lanes){
-      if(l===rideLane) continue;
-      const t=makeTrain(len); addEntity(t, l, z-len/2);
-      if(Math.random()<.6) coinRoof(l, z-2, len-3);
+  lateUpdate(dt) {
+    // Cinematic camera: slow orbit framing the Warden and the player
+    if (cinematic.active) {
+      const t = cinematic.t;
+      const focus = boss.position.clone().setY(boss.position.y + 3.2);
+      const ang = Math.atan2(player.position.x - boss.position.x,
+        player.position.z - boss.position.z) + t * 0.42;
+      const radius = 15 - Math.min(t, 2.4) * 3.4;
+      engine.camera.position.set(
+        focus.x + Math.sin(ang) * radius,
+        focus.y + 3.4 + Math.sin(t * 0.7) * 0.8,
+        focus.z + Math.cos(ang) * radius);
+      engine.camera.lookAt(focus);
+      hud.update(dt);
+      return;
     }
-    const train=makeTrain(len); addEntity(train, rideLane, z-len/2-4);
-    // ramp sits flush against the train's near end so you run straight up onto the roof
-    const trainNear=(z-len/2-4)+len/2; // == z-4
-    const rampZ=trainNear+RAMP_LEN/2-0.3;
-    const ramp=makeRamp(); addEntity(ramp, rideLane, rampZ);
-    // coin trail guiding up the slope
-    for(let i=0;i<5;i++){
-      const frac=(i+0.5)/5;
-      const c=makeCoin();
-      c.position.set(LANES[rideLane], frac*RAMP_TOP+0.8, rampZ+RAMP_LEN/2-frac*RAMP_LEN);
-      c.userData.spin=rand(0,6); scene.add(c); entities.push(c);
+    camera.lockTarget = spells.lockTarget;
+    camera.update(dt);
+    if (shake > 0.001) {
+      engine.camera.position.x += (Math.random() - 0.5) * shake;
+      engine.camera.position.y += (Math.random() - 0.5) * shake;
+      shake *= Math.exp(-8 * dt);
     }
-    coinRoof(rideLane, z-6, len-3);
-    coinLine(rideLane, z+10, 4);
-    return z - len - rand(20,28);
-  }
-  if(roll < 0.32){
-    // oncoming train with warning
-    const l=randi(0,2);
-    const t=makeTrain(rand(10,16)); t.userData.moving=true; addEntity(t, l, z-8);
-    AudioSys.horn();
-    for(let k=0;k<3;k++){ if(k!==l) coinLine(k, z-4-k*2, 5); }
-    const b=Math.random()<.5?makeBarrierLow():makeBarrierHigh();
-    addEntity(b, pick([0,1,2].filter(x=>x!==l)), z-14);
-    return z - rand(30,38);
-  }
-  if(roll < 0.48){
-    // full-width barrier wall with one gap
-    const gap=randi(0,2);
-    for(let l=0;l<3;l++){
-      if(l===gap) continue;
-      addEntity(Math.random()<.5?makeBarrierLow():makeBarrierHigh(), l, z);
+    // Flight widens the lens for a sense of speed
+    const wantFov = player.flying ? 68 : 55;
+    if (Math.abs(engine.camera.fov - wantFov) > 0.05) {
+      engine.camera.fov = THREE.MathUtils.lerp(engine.camera.fov, wantFov, 1 - Math.exp(-3 * dt));
+      engine.camera.updateProjectionMatrix();
     }
-    coinArc(gap, z+2);
-    if(Math.random()<.35){ const p=makePowerup(pick(['magnet','sneakers','star','board'])); addEntity(p, gap, z-10); }
-    return z - rand(20,26);
-  }
-  if(roll < 0.60){
-    // slalom poles
-    for(let i=0;i<4;i++){
-      addEntity(makePole(), (freeLane+i)%3===freeLane?(freeLane+1)%3:(freeLane+i)%3, z-i*8);
-      coinLine((freeLane+i+1)%3, z-i*8, 3);
+    // Underwater: deep teal fog swallows the view
+    if (engine.camera.position.y < world.waterLevel) {
+      engine.scene.fog.color.setHex(0x0d3540);
+      engine.scene.fog.density = 0.045;
     }
-    return z - 38;
-  }
-  if(roll < 0.72){
-    // jump arcs over low barriers
-    const l=randi(0,2);
-    addEntity(makeBarrierLow(), l, z);
-    addEntity(makeBarrierLow(), l, z-9);
-    coinArc(l, z+2);
-    coinLine((l+1)%3, z-4, 6);
-    return z - rand(24,30);
-  }
-  if(roll < 0.82){
-    // roll tunnel row
-    for(let l=0;l<3;l++) addEntity(makeBarrierHigh(), l, z);
-    coinLine(randi(0,2), z+1, 5, 0.6);
-    return z - rand(20,26);
-  }
-  if(roll < 0.90){
-    // power-up alley
-    const p=makePowerup(pick(['magnet','jetpack','sneakers','star','board']));
-    addEntity(p, randi(0,2), z);
-    coinLine(randi(0,2), z-6, 8);
-    addEntity(makeTrain(randi(8,14)), randi(0,2), z-20);
-    return z - rand(28,34);
-  }
-  // staggered trains — fairness rule: max TWO train lanes at once, the third
-  // lane is always a guaranteed escape route (coins + occasional hop/roll barrier)
-  const gapLane=randi(0,2);
-  for(let l=0;l<3;l++){
-    if(l===gapLane) continue;
-    const t=makeTrain(rand(7,13)); addEntity(t, l, z-rand(0,8));
-    if(Math.random()<.5) coinRoof(l, z-4, 7);
-  }
-  coinLine(gapLane, z, 8);
-  if(Math.random()<.4) addEntity(Math.random()<.5?makeBarrierLow():makeBarrierHigh(), gapLane, z-16);
-  return z - rand(26,34);
-}
-
-// ---------- missions / multiplier ----------
-function renderMissions(){
-  $('missions').innerHTML = G.missions.map(m=>
-    `<div class="mission ${m.prog>=m.target?'done':''}">${m.prog>=m.target?'✓ ':''}${m.text} (${Math.min(m.prog,m.target)}/${m.target})</div>`
-  ).join('');
-}
-function missionProg(id, n=1){
-  for(const m of G.missions){
-    if(m.id===id && m.prog<m.target){
-      m.prog+=n;
-      if(m.prog>=m.target){
-        G.mult=Math.min(30, G.mult+1);
-        toast(`MISSION COMPLETE! Multiplier x${G.mult}`);
-        AudioSys.power();
+    // Hand the light pool to whichever lamps are nearest, on a slow cadence
+    lightCullTimer -= dt;
+    if (lightCullTimer <= 0) {
+      lightCullTimer = 0.25;
+      for (const e of lightRank) {
+        e.l.getWorldPosition(_lightPos);
+        e.d = _lightPos.distanceToSquared(engine.camera.position);
       }
+      lightRank.sort((a, b) => a.d - b.d);
+      for (let i = 0; i < lightRank.length; i++) lightRank[i].l.visible = i < LIGHT_POOL;
+      profiler._litLights = Math.min(LIGHT_POOL, lightRank.length);
     }
-  }
-  renderMissions();
-}
-function resetMissions(){
-  G.mult=1; G.missionLevel=0;
-  G.missions=[
-    { id:'coins', text:'Collect 100 coins', target:100, prog:0 },
-    { id:'jump', text:'Jump 20 times', target:20, prog:0 },
-    { id:'roll', text:'Roll 20 times', target:20, prog:0 },
-  ];
-  const harder=[
-    { id:'coins', text:'Collect 300 coins', target:300, prog:0 },
-    { id:'jump', text:'Jump 40 times', target:40, prog:0 },
-    { id:'roll', text:'Roll 40 times', target:40, prog:0 },
-    { id:'coins', text:'Collect 600 coins', target:600, prog:0 },
-  ];
-  G._harder=harder; renderMissions();
-}
-function maybeNextMissionSet(){
-  if(G.missions.every(m=>m.prog>=m.target) && G._harder && G._harder.length){
-    G.missions = [G._harder.shift(), G._harder.shift()||{id:'coins',text:'Collect 500 coins',target:500,prog:0}, G._harder.shift()||{id:'jump',text:'Jump 60 times',target:60,prog:0}];
-    renderMissions();
-  }
-}
-
-// lay a sky-coin trail covering the whole jetpack flight, and clear the
-// ground coins ahead that would be unreachable while flying at y=6
-function seedSkyCoins(){
-  for(let i=entities.length-1;i>=0;i--){
-    const e=entities[i];
-    if(e.userData.kind==='coin' && e.position.z<-4 && e.position.z>-115){
-      scene.remove(e); entities.splice(i,1);
-    }
-  }
-  const flightDist=G.speed*6+70;
-  for(let zz=-2; zz>-flightDist; zz-=16) coinSkyRow(zz, 6);
-}
-
-// ---------- power-ups ----------
-function activatePower(type){
-  AudioSys.power();
-  if(type==='magnet'){ G.magnetT=8; toast('🧲 MAGNET!'); }
-  if(type==='jetpack'){
-    G.jetT=6; G.vy=0; G.grounded=false;
-    seedSkyCoins();
-    toast('🚀 JETPACK!');
-  }
-  if(type==='sneakers'){ G.sneakT=9; toast('👟 SUPER SNEAKERS!'); }
-  if(type==='star'){ G.starT=8; toast('⭐ 2x SCORE!'); }
-  if(type==='board'){ G.boards++; toast('🛹 +1 HOVERBOARD!'); updateBoardUI(); }
-  renderTimers();
-}
-function useBoard(){
-  if(G.state!=='run') return;
-  if(G.boardT>0 || G.boards<=0){ if(G.boards<=0) toast('No hoverboards! Grab one 🛹'); return; }
-  G.boards--; G.boardT=12; G.shield=true;
-  player.userData.board.visible=true;
-  toast('🛹 HOVERBOARD — crash shield ON!');
-  AudioSys.power(); updateBoardUI(); renderTimers();
-}
-function updateBoardUI(){ $('board-count').textContent=G.boards; $('keys').textContent=G.keys; }
-function renderTimers(){
-  const el=$('power-timers'); let h='';
-  if(G.magnetT>0) h+=`<div class="ptimer">🧲 ${G.magnetT.toFixed(0)}s</div>`;
-  if(G.jetT>0) h+=`<div class="ptimer">🚀 ${G.jetT.toFixed(0)}s</div>`;
-  if(G.sneakT>0) h+=`<div class="ptimer">👟 ${G.sneakT.toFixed(0)}s</div>`;
-  if(G.starT>0) h+=`<div class="ptimer">⭐ ${G.starT.toFixed(0)}s</div>`;
-  if(G.boardT>0) h+=`<div class="ptimer">🛹 ${G.boardT.toFixed(0)}s</div>`;
-  el.innerHTML=h;
-}
-
-// ---------- actions ----------
-function doJump(){
-  if(G.state!=='run') return;
-  if(G.jetT>0) return;
-  if(G.grounded){
-    G.vy = G.sneakT>0 ? 13.5 : 10;
-    G.grounded=false; G.onTrainTop=false;
-    G.jumps++; missionProg('jump'); maybeNextMissionSet();
-    AudioSys.jump();
-  }
-}
-function doRoll(){
-  if(G.state!=='run') return;
-  if(G.jetT>0) return;
-  if(!G.grounded){
-    // slam: cancel jump, fast fall into roll (like the original)
-    G.vy=Math.min(G.vy,-22);
-  }
-  if(G.rolling<=0){
-    G.rolling=G.rollDur; G.rolls++; missionProg('roll'); maybeNextMissionSet();
-    AudioSys.roll();
-  } else G.rolling=G.rollDur; // extend
-}
-
-// ---------- collisions ----------
-function playerBox(){
-  const h = G.rolling>0 ? 0.9 : 1.9;
-  return { x:G.x, y:G.y + h/2, z:0, hw:0.42, hh:h/2, len:0.7 };
-}
-function overlap(a, b){ // a player box, b entity box at z
-  return Math.abs(a.x-b.x) < (a.hw+b.hw) &&
-         Math.abs(a.z-b.z) < (a.len/2 + b.len/2) &&
-         (a.y-a.hh) < b.top && (a.y+a.hh) > b.bottom;
-}
-function groundAt(x, y){
-  let g=0;
-  for(const e of entities){
-    const u=e.userData;
-    if(u.kind==='train'){
-      // 1.15 (not 1.0) so adjacent train roofs overlap: switching lanes
-      // across roofs can never dip into a "dead zone" and side-swipe
-      if(Math.abs(e.position.z) < u.len/2+0.6 && Math.abs(x-e.position.x) < 1.15){
-        if(y >= u.topY-0.55) g=Math.max(g, u.topY);
-      }
-    } else if(u.kind==='ramp'){
-      // sloped support: low at player-side edge, high at train-side edge.
-      // Ramp centre dz goes -half (first touch, h=0) -> +half (h=top)
-      // as the world slides it under the player.
-      const half=u.len/2, dz=e.position.z;
-      if(Math.abs(dz) < half+0.8 && Math.abs(x-e.position.x) < 1.0){
-        const t=clamp((half-dz)/u.len, 0, 1);
-        const h=(1-t)*u.top;
-        if(y >= h-0.6) g=Math.max(g, h);
-      }
-    }
-  }
-  return g;
-}
-
-let hitCooldown=0;
-function checkCollisions(dt){
-  if(G.invinc>0 || G.dead) return;
-  const pb=playerBox();
-
-  // coins + powers first (generous pickup)
-  for(let i=entities.length-1;i>=0;i--){
-    const e=entities[i], u=e.userData;
-    if(u.kind==='coin'){
-      let dx=e.position.x-G.x, dy=e.position.y-(G.y+1.0), dz=e.position.z;
-      const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
-      if(G.magnetT>0 && dist<9 && G.jetT<=0){
-        e.position.x += (G.x-e.position.x)*Math.min(1,dt*10);
-        e.position.y += ((G.y+1.0)-e.position.y)*Math.min(1,dt*10);
-        e.position.z += (0-e.position.z)*Math.min(1,dt*6);
-      }
-      if(dist<1.15){
-        scene.remove(e); entities.splice(i,1);
-        G.coins++; G.runCoins++; missionProg('coins'); maybeNextMissionSet();
-        AudioSys.coin();
-      }
-    } else if(u.kind==='power'){
-      if(Math.abs(e.position.z)<1.2 && Math.abs(e.position.x-G.x)<1.1 && (G.y+1)<3.2){
-        const t=u.ptype; scene.remove(e); entities.splice(i,1);
-        activatePower(t);
-      }
-    }
-  }
-
-  if(G.jetT>0) return; // flying above everything
-
-  for(let i=entities.length-1;i>=0;i--){
-    const e=entities[i], u=e.userData;
-    if(u.kind==='coin'||u.kind==='power') continue;
-    const dz=e.position.z;
-    if(Math.abs(dz)>3) continue;
-    const ex=e.position.x;
-
-    // ramps are walkable ground (handled by groundAt) — never a collider
-    if(u.kind==='ramp') continue;
-    if(u.kind==='low'){
-      const box={x:ex, top:1.05, bottom:0, hw:1.0, len:0.6, z:dz};
-      if(overlap(pb,box)){
-        // must be airborne above bar
-        if((G.y) < 0.75) return die('tripped on a barrier!');
-      }
-      continue;
-    }
-    if(u.kind==='high'){
-      const rolling = G.rolling>0;
-      // sign occupies y 1.4..2.3 ; roll height 0.9 fits under
-      const headY = G.y + (rolling?0.9:1.9);
-      if(Math.abs(dz)<0.9 && Math.abs(ex-G.x)<1.0 && headY>1.35){
-        return die('slammed into an overhead sign!');
-      }
-      continue;
-    }
-    if(u.kind==='train' || u.kind==='block'){
-      const top = u.kind==='train' ? u.topY : u.h;
-      const standingOnTop = u.kind==='train' && G.y >= top-0.55;
-      if(standingOnTop) continue; // safely on the roof
-      const box={x:ex, top, bottom:0, hw:(u.w||1.9)/2, len:u.len||0.6, z:dz};
-      if(overlap(pb,box)) return die(u.kind==='train'?'hit a train!':'ran into a signal!');
-    }
-  }
-}
-
-function die(why){
-  if(G.shield || G.boardT>0){
-    // hoverboard saves you: smash through
-    G.shield=false;
-    if(G.boardT>0){ G.boardT=0; player.userData.board.visible=false; }
-    G.invinc=2;
-    // clear nearby killers
-    for(let i=entities.length-1;i>=0;i--){
-      const e=entities[i];
-      if(Math.abs(e.position.z)<6 && (e.userData.kind==='train'||e.userData.kind==='block'||e.userData.kind==='low'||e.userData.kind==='high')){
-        scene.remove(e); entities.splice(i,1);
-      }
-    }
-    toast('🛹 BOARD SAVED YOU!');
-    AudioSys.crash(); renderTimers();
-    const f=$('stumble-flash'); f.style.opacity=1; setTimeout(()=>f.style.opacity=0,250);
-    return;
-  }
-  AudioSys.crash();
-  G.dead=true; G.state='over';
-  guard.visible=true; dog.visible=true;
-  setTimeout(()=>showGameOver(why), 900);
-}
-
-// ---------- flow ----------
-function clearEntities(){
-  for(const e of entities) scene.remove(e);
-  entities.length=0;
-}
-function startRun(){
-  AudioSys.init(); AudioSys.click();
-  clearEntities();
-  Object.assign(G,{ state:'countdown', speed:G.baseSpeed, lane:1, x:0, y:0, vy:0,
-    grounded:true, rolling:0, score:0, coins:0, runCoins:0, starT:0, magnetT:0, sneakT:0,
-    jetT:0, boardT:0, shield:false, invinc:0, distance:0, dead:false, jumps:0, rolls:0,
-    keys:G.keys, boards:Math.max(1,G.boards), time:0, nextSpawnZ:-40 });
-  resetMissions();
-  player.userData.board.visible=false; player.userData.jet.visible=false;
-  guard.visible=true; dog.visible=true; guard.position.set(0,0,4.5); dog.position.set(0.8,0,4.8);
-  $('menu').classList.add('hidden'); $('gameover').classList.add('hidden'); $('pause').classList.add('hidden');
-  $('hud').classList.remove('hidden');
-  updateBoardUI(); renderTimers(); renderMissions();
-  // countdown 3-2-1-GO with inspector chase intro
-  const cd=$('countdown'); cd.classList.remove('hidden');
-  let n=3; cd.textContent=n;
-  const iv=setInterval(()=>{
-    n--;
-    if(n<=0){ clearInterval(iv); cd.textContent='GO!'; AudioSys.power();
-      setTimeout(()=>{ cd.classList.add('hidden'); G.state='run'; }, 500);
-    } else { cd.textContent=n; AudioSys.click(); }
-  }, 600);
-}
-function showGameOver(why){
-  $('hud').classList.add('hidden');
-  const go=$('gameover'); go.classList.remove('hidden');
-  $('go-sub').textContent = 'You ' + why + ' The Inspector caught up…';
-  $('go-score').textContent = Math.floor(G.score).toLocaleString();
-  $('go-coins').textContent = G.runCoins;
-  const best=Math.max(store.best, Math.floor(G.score));
-  const isBest=Math.floor(G.score)>store.best;
-  store.best=best; store.totalCoins=store.totalCoins+G.runCoins;
-  $('go-best').textContent=best.toLocaleString();
-  $('go-newbest').classList.toggle('hidden', !isBest);
-  $('btn-revive').style.display = G.keys>0 ? 'block':'none';
-  $('btn-revive').textContent=`🔑 REVIVE (${G.keys} key${G.keys===1?'':'s'})`;
-  $('menu-best').textContent=best.toLocaleString();
-  $('menu-total-coins').textContent=store.totalCoins;
-}
-function revive(){
-  if(G.keys<=0) return;
-  G.keys--; AudioSys.power();
-  // clear killers around player, grant shield
-  for(let i=entities.length-1;i>=0;i--){
-    const e=entities[i];
-    if(e.position.z>-10 && e.position.z<14){ scene.remove(e); entities.splice(i,1); }
-  }
-  G.dead=false; G.state='run'; G.invinc=2.5; G.boardT=5; G.shield=true;
-  player.userData.board.visible=true;
-  guard.visible=false; dog.visible=false;
-  $('gameover').classList.add('hidden'); $('hud').classList.remove('hidden');
-  toast('💪 Back on the run!'); updateBoardUI(); renderTimers();
-}
-
-// ---------- input ----------
-addEventListener('keydown', e=>{
-  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
-  if(G.state==='menu' && (e.key==='Enter'||e.key===' ')){ startRun(); return; }
-  if(G.state==='over' && e.key==='Enter'){ startRun(); return; }
-  if(e.key==='p'||e.key==='P'||e.key==='Escape'){
-    if(G.state==='run'){ G.state='pause'; $('pause').classList.remove('hidden'); }
-    else if(G.state==='pause'){ G.state='run'; $('pause').classList.add('hidden'); }
-    return;
-  }
-  if(G.state!=='run') return;
-  switch(e.key){
-    case 'ArrowLeft': case 'a': case 'A': G.lane=clamp(G.lane-1,0,2); AudioSys.click(); break;
-    case 'ArrowRight': case 'd': case 'D': G.lane=clamp(G.lane+1,0,2); AudioSys.click(); break;
-    case 'ArrowUp': case 'w': case 'W': doJump(); break;
-    case 'ArrowDown': case 's': case 'S': doRoll(); break;
-    case 'h': case 'H': useBoard(); break;
-    case ' ': // space = jump, double-space handled via board button; single space jumps
-      if(e.repeat) break;
-      const now=performance.now();
-      if(now-(G._lastSpace||0)<280){ useBoard(); G._lastSpace=0; }
-      else { G._lastSpace=now; doJump(); }
-      break;
-  }
+    if (engine.input.wasPressed('F3')) profiler.toggle();
+    // Pointer lock swallows clicks on the HUD, so '?' does the same job as
+    // the button without having to leave the game first
+    if (engine.input.wasPressed('Slash')) hud.toggleHelp();
+    profiler.render({
+      objects: engine.scene.children.length,
+      lights: `${profiler._litLights ?? 0}/${allPointLights.length}`,
+      instanced: world.vegetation.treeLodNear.length + world.vegetation.treeLodFar.length,
+      grass: world.vegetation.grass.count,
+      props: props.props.filter((p) => !p.broken).length,
+      enemies: enemies.enemies.filter((e) => !e.dead).length,
+    });
+    hud.update(dt);
+  },
 });
 
-// touch swipes
-let tsX=0,tsY=0,tsT=0,lastTap=0;
-canvas.addEventListener('touchstart', e=>{
-  AudioSys.init();
-  const t=e.changedTouches[0]; tsX=t.clientX; tsY=t.clientY; tsT=performance.now();
-},{passive:true});
-canvas.addEventListener('touchend', e=>{
-  const t=e.changedTouches[0];
-  const dx=t.clientX-tsX, dy=t.clientY-tsY, adx=Math.abs(dx), ady=Math.abs(dy);
-  const now=performance.now();
-  if(G.state==='menu'){ startRun(); return; }
-  if(G.state!=='run') return;
-  if(Math.max(adx,ady)<24){
-    // tap: jump; double-tap: board
-    if(now-lastTap<300){ useBoard(); lastTap=0; }
-    else { lastTap=now; setTimeout(()=>{ if(lastTap!==0){ doJump(); lastTap=0; } },310); }
-    return;
-  }
-  if(adx>ady){ G.lane=clamp(G.lane+(dx>0?1:-1),0,2); }
-  else if(dy<0){ doJump(); }
-  else { doRoll(); }
-  e.preventDefault();
-},{passive:false});
-// mouse swipe (desktop testing)
-let mDown=null;
-canvas.addEventListener('mousedown', e=>{ mDown={x:e.clientX,y:e.clientY}; });
-addEventListener('mouseup', e=>{
-  if(!mDown || G.state!=='run'){ mDown=null; return; }
-  const dx=e.clientX-mDown.x, dy=e.clientY-mDown.y;
-  if(Math.abs(dx)<10&&Math.abs(dy)<10){ doJump(); }
-  else if(Math.abs(dx)>Math.abs(dy)){ G.lane=clamp(G.lane+(dx>0?1:-1),0,2); }
-  else if(dy<0) doJump(); else doRoll();
-  mDown=null;
-});
+engine.start();
 
-$('btn-start').onclick=startRun;
-$('btn-restart').onclick=startRun;
-$('btn-revive').onclick=revive;
-$('btn-menu').onclick=()=>{ $('gameover').classList.add('hidden'); $('menu').classList.remove('hidden'); G.state='menu'; guard.visible=false; dog.visible=false; };
-$('btn-pause').onclick=()=>{ if(G.state==='run'){ G.state='pause'; $('pause').classList.remove('hidden'); } };
-$('btn-resume').onclick=()=>{ G.state='run'; $('pause').classList.add('hidden'); };
-$('btn-quit').onclick=()=>{ $('pause').classList.add('hidden'); $('hud').classList.add('hidden'); $('menu').classList.remove('hidden'); G.state='menu'; };
-$('btn-board').onclick=useBoard;
-$('menu-best').textContent=store.best.toLocaleString();
-$('menu-total-coins').textContent=store.totalCoins;
+if (import.meta.env.DEV) {
+  // Fixed camera poses for __game.probe(): the views whose cost actually
+  // matters — the approach, the courtyard, the hall, deep forest, the village.
+  const PROBE_VIEWS = [
+    ['approach', [6, 22, -40], [0, 24, -120]],
+    ['court', [2, 32, -95], [-20, 26, -125]],
+    ['hall', [-30, 28, -112], [-30, 26, -132]],
+    ['forest', [120, 26, 60], [60, 14, -20]],
+    ['village', [150, 8, 280], [150, 4, 240]],
+  ];
 
-// ---------- animation helpers ----------
-let runPhase=0;
-function animatePlayer(dt){
-  const u=player.userData;
-  runPhase += dt * (8 + G.speed*0.55);
-  const targetX=LANES[G.lane];
-  G.x += (targetX-G.x)*Math.min(1,dt*12);
-  player.position.x=G.x;
-
-  if(G.jetT>0){
-    G.y += (6-G.y)*Math.min(1,dt*3);
-    player.position.y=G.y;
-    player.rotation.x=-0.25;
-    u.jet.visible=true;
-    u.legL.rotation.x=Math.sin(runPhase*.5)*0.4-0.5; u.legR.rotation.x=-Math.sin(runPhase*.5)*0.4-0.5;
-    u.armL.rotation.x=-2.6; u.armR.rotation.x=-2.6; // holding jetpack
-  } else {
-    u.jet.visible=false;
-    player.rotation.x=0;
-    // vertical physics
-    if(!G.grounded){
-      G.vy += GRAVITY*dt;
-      G.y += G.vy*dt;
-      const gnd=groundAt(G.x, G.y);
-      if(G.y<=gnd && G.vy<=0){ G.y=gnd; G.vy=0; G.grounded=true; if(gnd>0.1) G.onTrainTop=true; }
-      if(G.y<0){ G.y=0; G.vy=0; G.grounded=true; }
-    } else {
-      const gnd=groundAt(G.x, G.y+0.3);
-      if(Math.abs(gnd-G.y)>0.05){
-        if(gnd<G.y-0.1){ G.grounded=false; } // ran off train edge
-        else { G.y=gnd; }
+  // Development-only handle for teleport, time control, and inspection.
+  // It is removed from production builds.
+  window.__game = {
+    engine, world, player, camera, spells, enemies, npcs, weather, quests, collectibles, audio, hud,
+    progression, charPanel, props, inventory, boss, cinematic, worldState,
+    equipment, shop, profiler, dialogue, dialoguePanel, karma, caches, plants, mobile,
+    minimap,
+    step(n = 1, dt = 1 / 60) {
+      for (let i = 0; i < n; i++) engine.tick(dt);
+    },
+    // Draw-call/triangle census from fixed camera poses. It renders without
+    // advancing the simulation, so the numbers are reproducible between runs.
+    probe(views = PROBE_VIEWS) {
+      const r = engine.renderer;
+      const cam = engine.camera;
+      const pos = cam.position.clone();
+      const quat = cam.quaternion.clone();
+      const playerPos = player.position.clone();
+      r.info.autoReset = false;
+      const out = {};
+      for (const [name, from, to] of views) {
+        // Stand the player where the camera is and tick once, so every
+        // distance-driven gate (LOD, interior dressing) settles for this view.
+        player.position.set(from[0], from[1], from[2]);
+        engine.tick(1 / 60);
+        cam.position.set(from[0], from[1], from[2]);
+        cam.lookAt(to[0], to[1], to[2]);
+        cam.updateMatrixWorld(true);
+        r.info.reset();
+        engine.composer.render();
+        out[name] = {
+          calls: r.info.render.calls,
+          ktris: Math.round(r.info.render.triangles / 1000),
+        };
       }
-    }
-    player.position.y=G.y;
-    if(G.rolling>0){
-      G.rolling-=dt;
-      player.scale.set(1.15,0.55,1.15);
-      player.rotation.x=-0.6;
-      u.legL.rotation.x=u.legR.rotation.x=0; u.armL.rotation.x=u.armR.rotation.x=0;
-    } else {
-      player.scale.set(1,1,1);
-      if(!G.grounded){
-        player.rotation.x = G.vy>0 ? -0.18 : 0.25;
-        // tuck legs when rising with sneakers
-        const tuck = G.sneakT>0?0.9:0.4;
-        u.legL.rotation.x=-tuck; u.legR.rotation.x=0.3;
-        u.armL.rotation.x=-2.4; u.armR.rotation.x=-2.4;
-      } else {
-        player.rotation.x=0;
-        u.legL.rotation.x=Math.sin(runPhase)*0.95;
-        u.legR.rotation.x=-Math.sin(runPhase)*0.95;
-        u.armL.rotation.x=-Math.sin(runPhase)*0.8;
-        u.armR.rotation.x=Math.sin(runPhase)*0.8;
-        player.position.y=G.y+Math.abs(Math.sin(runPhase))*0.08;
-      }
-    }
+      r.info.autoReset = true;
+      player.position.copy(playerPos);
+      cam.position.copy(pos);
+      cam.quaternion.copy(quat);
+      return out;
+    },
+  };
+
+  const captureScene = new URLSearchParams(window.location.search).get('capture');
+  if (captureScene) {
+    import('./dev/CaptureDirector.js').then(({ startCaptureDirector }) => {
+      startCaptureDirector(captureScene, {
+        input: engine.input,
+        engine,
+        world,
+        player,
+        camera,
+        spells,
+        enemies,
+        npcs,
+        weather,
+        quests,
+        collectibles,
+        audio,
+        hud,
+        progression,
+        charPanel,
+        props,
+        inventory,
+        boss,
+        cinematic,
+        worldState,
+        equipment,
+        shop,
+        dialogue,
+        dialoguePanel,
+        karma,
+        caches,
+        plants,
+        mobile,
+        dialogueTree: MAELIS_TREE,
+      });
+    });
   }
-  // lean into lane switches
-  const lean=clamp((targetX-G.x)*0.4,-0.5,0.5);
-  player.rotation.z=-lean;
-  player.rotation.y=lean*0.7;
-  // board glow pulse
-  u.board.visible = G.boardT>0;
-  if(u.board.visible) u.board.position.y=0.12+Math.sin(performance.now()*0.01)*0.03;
-  // invinc blink
-  player.visible = !(G.invinc>0 && Math.floor(performance.now()/120)%2===0) || G.dead;
 }
-
-// ---------- main loop ----------
-const clock=new THREE.Clock();
-let timerTick=0;
-
-function update(dt){
-  G.time+=dt;
-  if(G.state!=='run') return;
-
-  // speed ramp (like the original: faster = more points)
-  G.speed=Math.min(G.maxSpeed, G.speed+dt*0.22);
-  const move=G.speed*dt;
-  G.distance+=move;
-
-  // score
-  const rate=G.speed*(G.starT>0?2:1)*G.mult;
-  G.score+=rate*dt*10;
-  maybeNextMissionSet();
-
-  // timers
-  const wasJet=G.jetT>0;
-  for(const k of ['starT','magnetT','sneakT','jetT','boardT']) if(G[k]>0) G[k]-=dt;
-  if(wasJet && G.jetT<=0){
-    // jetpack ended: falling back to the tracks — brief grace so the
-    // landing spot can't insta-kill
-    G.vy=0; G.invinc=Math.max(G.invinc,1.5);
-  }
-  if(G.boardT<=0 && !G.shield) player.userData.board.visible=false;
-  if(G.boardT<=0) G.shield = G.shield && false; // shield consumed with board
-  // keep shield while board active
-  if(G.boardT>0) G.shield=true;
-  if(G.invinc>0) G.invinc-=dt;
-  timerTick+=dt; if(timerTick>0.25){ timerTick=0; renderTimers(); }
-
-  // spawn ahead
-  while(G.nextSpawnZ>-140){
-    if(G.jetT>0){ coinSkyRow(G.nextSpawnZ, 6); G.nextSpawnZ-=30; }
-    else G.nextSpawnZ=spawnPattern(G.nextSpawnZ);
-  }
-  G.nextSpawnZ+=move;
-
-  // move entities toward camera
-  for(let i=entities.length-1;i>=0;i--){
-    const e=entities[i], u=e.userData;
-    let v=move;
-    if(u.moving) v+=14*dt; // oncoming trains
-    e.position.z+=v;
-    if(u.kind==='coin'){ e.rotation.x+=(dt*4); e.position.y+=(Math.sin(G.time*3+e.position.z)*0.002); }
-    if(u.kind==='power'&&u.box){ u.box.rotation.y+=dt*2; u.box.position.y=Math.sin(G.time*3)*0.12; }
-    if(u.signal) u.signal.material.color.setHex(Math.floor(G.time*4)%2?0xff0000:0x550000);
-    if(e.position.z>16){ scene.remove(e); entities.splice(i,1); }
-  }
-
-  // recycle sleepers / props
-  for(const s of sleepers){ s.position.z+=move; if(s.position.z>12) s.position.z-=132; }
-  for(const p of sideProps){ p.mesh.position.z+=move; if(p.mesh.position.z>15){ p.mesh.position.z-=155; if(p.mesh.geometry&&p.mesh.geometry.type==='BoxGeometry'&&p.mesh.position.y>4){ p.mesh.material.map=buildingTexture(); } } }
-  for(const c of clouds){ c.position.z+=move*0.15; if(c.position.z>20) c.position.z=-150; }
-
-  animatePlayer(dt);
-  checkCollisions(dt);
-
-  // guard runs behind at start / on revive gap
-  if(guard.visible){
-    guard.position.x += (G.x-guard.position.x)*dt*3;
-    guard.position.z = G.dead ? guard.position.z - move*1.5 : guard.position.z + move*0.15;
-    dog.position.x=guard.position.x+0.8; dog.position.z=guard.position.z+0.3;
-    const gp=guard.userData;
-    if(gp.legL){ gp.legL.rotation.x=Math.sin(runPhase+1)*0.9; gp.legR.rotation.x=-Math.sin(runPhase+1)*0.9; }
-    if(G.time>4 && !G.dead){ guard.visible=false; dog.visible=false; }
-    if(G.dead){ if(guard.position.z<0.8){ guard.position.z=0.8; dog.position.z=1.1; } }
-  }
-
-  // camera follows player lane slightly + jetpack height
-  const camTX=G.x*0.45;
-  camera.position.x += (camTX-camera.position.x)*Math.min(1,dt*5);
-  camera.position.y += (((G.jetT>0?7.5:4.6)+G.y*0.25)-camera.position.y)*Math.min(1,dt*4);
-  camera.position.z=7.2;
-  camera.lookAt(G.x*0.6, 1.6+G.y*0.35, -8);
-
-  // HUD
-  $('score').textContent=Math.floor(G.score).toLocaleString();
-  $('mult').textContent='x'+G.mult+(G.starT>0?' ⭐':'');
-  $('coins').textContent=G.coins;
-}
-
-function loop(){
-  requestAnimationFrame(loop);
-  const dt=Math.min(clock.getDelta(), 0.05);
-  if(G.state==='menu'||G.state==='over'||G.state==='pause'){
-    // idle scene motion
-    const t=performance.now()*0.0002;
-    camera.position.set(Math.sin(t)*1.5, 4.6, 7.2);
-    camera.lookAt(0,1.6,-8);
-    runPhase+=dt*8;
-    player.position.set(0,Math.abs(Math.sin(runPhase))*0.06,0);
-    player.userData.legL.rotation.x=Math.sin(runPhase)*0.5;
-    player.userData.legR.rotation.x=-Math.sin(runPhase)*0.5;
-    if(G.state==='over'){ // guard catches player
-      guard.position.z += (0.8-guard.position.z)*Math.min(1,dt*3);
-      dog.position.z=guard.position.z+0.3;
-    }
-    renderer.render(scene,camera);
-    return;
-  }
-  update(dt);
-  renderer.render(scene,camera);
-}
-
-// init camera + first coins for menu backdrop
-camera.position.set(0,4.6,7.2);
-coinLine(1,-20,8);
-loop();

@@ -1,80 +1,111 @@
-# Subway Surfers Clone — "Subway Dash"
+# Veilspire
 
-A playable 3D endless-runner game for the browser, built in the style of
-**Subway Surfers** (SYBO/Kiloo). Run down the tracks, dodge trains and
-barriers, grab coins and power-ups, and outrun the Inspector.
+[![CI](https://github.com/Lunaneco/veilspire/actions/workflows/ci.yml/badge.svg)](https://github.com/Lunaneco/veilspire/actions/workflows/ci.yml)
+[![Deploy GitHub Pages](https://github.com/Lunaneco/veilspire/actions/workflows/pages.yml/badge.svg)](https://github.com/Lunaneco/veilspire/actions/workflows/pages.yml)
 
-> Built with **Muse Spark 1.3** — all art and code are original and generated
-> procedurally at runtime. No assets from the original game are used.
-> Fan-made project, not affiliated with SYBO Games or Kiloo.
+Veilspire is an original browser-based, open-world magical action RPG built
+with Three.js. Its world, characters, effects, textures, and audio are
+generated at runtime; the repository does not include third-party game assets.
 
-## Play it
+Created by Lunaneco.
 
-No build step — just serve the folder over HTTP (ES modules + CDN):
+This is an independent project and is not affiliated with or endorsed by any
+existing game, film, book, publisher, or entertainment franchise.
 
-```bash
-cd subway-surfers-clone
-npx serve .                 # or: python3 -m http.server 8000
+**[Play Veilspire in your browser](https://lunaneco.github.io/veilspire/)**
+
+## Gameplay trailer
+
+<a href="./media/veilspire-pv-ja.mp4">
+  <img src="./media/veilspire-pv-poster.jpg" alt="Veilspire gameplay trailer title card" width="800">
+</a>
+
+[日本語版を見る（irodori-TTSナレーション付き）](./media/veilspire-pv-ja.mp4)
+·
+[Watch in English](./media/veilspire-pv-en.mp4)
+
+## Features
+
+- A procedural 3D world with a castle, village, ruins, cavern, weather, and a
+  day/night cycle
+- Third-person exploration, swimming, flight, lock-on combat, spells, enemies,
+  a boss encounter, quests, dialogue, equipment, crafting, and progression
+- Touch controls with a movement stick, swipe camera, combat buttons, safe-area
+  support, and portrait/landscape phone layouts
+- A north-up valley map with color-coded markers for the player, main and side
+  objectives, unopened treasure, and living enemies
+- Harvestable Ember Caps and Frost Leaves for the brewing loop
+- Procedurally synthesized ambience and effects
+- Local-only save data with no account, analytics, advertising, or remote API
+
+## Requirements
+
+- Node.js 24 recommended; Node.js 20.19+ within 20.x or Node.js 22.12+ is
+  supported
+- npm
+- A modern browser with WebGL 2 support
+
+## Run locally
+
+```sh
+npm ci
+npm run dev
 ```
 
-Then open the printed URL in a browser. Internet access is required once,
-to load Three.js from the `unpkg.com` CDN (see the `importmap` in
-`index.html`).
+Open the local address printed by Vite. The development server binds to
+`127.0.0.1` so it is not exposed to the local network.
+
+For a production build:
+
+```sh
+npm run build
+npm run preview
+```
+
+The generated site is written to `dist/`. `vite preview` is intended only for
+local verification, not as a production server.
 
 ## Controls
 
-| Input | Action |
-|---|---|
-| `◀` `▶` / `A` `D` | Switch lane |
-| `▲` / `W` | Jump |
-| `▼` / `S` | Roll (press mid-air to slam down out of a jump) |
-| `H` / double-tap / double-`Space` | Ride hoverboard (survives one crash) |
-| `P` / `Esc` | Pause |
-| Touch | Swipe to move, swipe down mid-air to slam, double-tap for hoverboard |
+| Action | Input |
+| --- | --- |
+| Move / sprint / jump / dodge | WASD or arrows / Shift / Space / Q |
+| Basic bolt / ward | Left mouse or Z / right mouse or X |
+| Push / ember / frost / levitate | E / R / C / V |
+| Lock on / interact / fly | Tab / F / G |
+| Character panel / potions | I / 1 or 2 |
+| Veilbreak | T |
+| Controls panel / profiler | ? or `/` / F3 |
+| Touch devices | Left stick to move, swipe the right side to look, and use the on-screen action/spell buttons |
 
-## Gameplay (researched from the original)
+## Privacy and security
 
-Mechanics were researched from the public Subway Surfers wiki, Wikipedia and
-the official help center, then re-implemented from scratch:
+Veilspire has no backend and sends no gameplay or personal data to a server.
+Progress is stored in the browser's `localStorage` under keys beginning with
+`veilspire.`. Clearing the site's browser storage resets that progress.
 
-- **3-lane endless tracks** with a behind-the-runner camera; speed (and score
-  rate) rises the longer you survive.
-- **Obstacles** — parked trains, oncoming trains (horn + warning light), low
-  barriers (jump), overhead signs (roll), signal poles, and ramps that carry
-  you up onto train roofs, where coin grids wait.
-- **Coins** spawn in lines, jump arcs, roof grids and jetpack sky trails.
-- **Power-ups** — 🧲 Magnet (pulls coins), 🚀 Jetpack (flies above the tracks
-  on a dedicated coin trail), 👟 Super Sneakers (higher jump), ⭐ 2× score,
-  🛹 Hoverboard pickups (one-hit shield).
-- **Score multiplier** (up to ×30) grows by completing missions; keys revive
-  you after a crash; best score and lifetime coins persist in `localStorage`.
-- **Fair spawner** — at most two lanes are ever fully blocked at once, so
-  there is always an escape route forward.
+No environment variables or credentials are required. Never add secrets to
+client-side code: everything shipped in a browser bundle is public. See
+[SECURITY.md](SECURITY.md) for responsible vulnerability reporting.
 
-## Project structure
+The repository intentionally excludes dependency folders, build output,
+machine-local assistant/editor settings, environment files, certificates, and
+private keys. Install exactly the dependency versions recorded in
+`package-lock.json` with `npm ci`.
 
-```text
-subway-surfers-clone/
-├── index.html   # Canvas, HUD, menus (main / pause / game-over), overlays
-├── style.css    # All UI styling, responsive + mobile safe-areas
-├── main.js      # Entire game: Three.js world, player, spawner, collisions,
-│                #   power-ups, missions, procedural audio — no external assets
-└── README.md    # This file
-```
+## GitHub Pages
 
-`main.js` is intentionally dependency-free apart from Three.js: trains,
-graffiti textures, buildings, the runner character, the Inspector and his
-dog, coins, effects and even the sound effects (WebAudio oscillators) are
-all synthesized in code.
+The included workflow builds and deploys `dist/` from the `main` branch. In the
+repository's **Settings → Pages**, select **GitHub Actions** as the publishing
+source. Do not select **Deploy from a branch**: that option serves the
+unbundled source files and the game will not load correctly. Relative asset
+paths are configured so project pages work under a repository subpath.
 
-## Tech
+## Contributing
 
-- [Three.js](https://threejs.org/) (r160 via CDN import map) — 3D scene,
-  lighting, shadows, fog.
-- Vanilla JS + HTML/CSS — no framework, no build tools, no assets.
-- Procedural `CanvasTexture` art (graffiti trains, buildings, ramp stripes).
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+before opening a pull request.
 
-## History
+## License
 
-See `git log` — the build is committed in stages: initial playable game,
-ramp rework, spawner-fairness/jetpack pass, and this README.
+Released under the [MIT License](LICENSE).
